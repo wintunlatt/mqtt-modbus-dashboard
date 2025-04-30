@@ -1,7 +1,7 @@
-# modbus_mqtt_publisher.py
 from pymodbus.client import ModbusTcpClient
 import paho.mqtt.client as mqtt
 import time
+import socket
 
 # Modbus server details
 IP_ADDRESS = '192.168.1.11'
@@ -14,60 +14,68 @@ MQTT_BROKER = "test.mosquitto.org"
 MQTT_PORT = 1883
 MQTT_TOPIC = "Win/MQTT_test/modbus_data"
 
-def read_coil(client, address):
-    try:
-        result = client.read_coils(address, count=1)
-        if result.isError():
-            print(f"Error reading coil {address}")
-            return None
-        return result.bits[0]
-    except Exception as e:
-        print(f"Exception reading coil: {e}")
+def create_modbus_client():
+    client = ModbusTcpClient(IP_ADDRESS, port=PORT)
+    if client.connect():
+        print("Connected to Modbus server.")
+        return client
+    else:
+        print("Failed to connect to Modbus server.")
         return None
+
+def read_coil(client, address):
+    result = client.read_coils(address, count=1)
+    return result.bits[0] if not result.isError() else None
 
 def read_analog(client, address):
-    try:
-        result = client.read_holding_registers(address - 1, count=1)
-        if result.isError():
-            print(f"Error reading holding register {address}")
-            return None
-        return result.registers[0]
-    except Exception as e:
-        print(f"Exception reading analog value: {e}")
-        return None
+    result = client.read_holding_registers(address - 1, count=1)
+    return result.registers[0] if not result.isError() else None
 
 def main():
-    # Connect to Modbus
-    modbus_client = ModbusTcpClient(IP_ADDRESS, port=PORT)
-    if not modbus_client.connect():
-        print("Unable to connect to Modbus server.")
-        return
-
-    # Connect to MQTT
+    modbus_client = create_modbus_client()
     mqtt_client = mqtt.Client()
     mqtt_client.connect(MQTT_BROKER, MQTT_PORT)
+    mqtt_client.loop_start()
 
-    print("Connected to Modbus server and MQTT broker.")
     try:
         while True:
-            coil_value = read_coil(modbus_client, COIL_ADDRESS)
-            analog_value = read_analog(modbus_client, REGISTER_ADDRESS)
+            # If modbus_client is not connected, try to reconnect
+            if modbus_client is None or not modbus_client.connected:
+                print("Reconnecting to Modbus server...")
+                modbus_client = create_modbus_client()
+                time.sleep(5)
+                continue
 
-            if coil_value is not None and analog_value is not None:
-                payload = {
-                    "coil": coil_value,
-                    "analog": analog_value
-                }
-                mqtt_client.publish(MQTT_TOPIC, str(payload))
-                print(f"Published to MQTT: {payload}")
-            else:
-                print("Failed to read Modbus data. Skipping publish.")
+            try:
+                coil_value = read_coil(modbus_client, COIL_ADDRESS)
+                analog_value = read_analog(modbus_client, REGISTER_ADDRESS)
+
+                if coil_value is not None and analog_value is not None:
+                    payload = {
+                        "coil": coil_value,
+                        "analog": analog_value
+                    }
+                    mqtt_client.publish(MQTT_TOPIC, str(payload))
+                    print(f"Published to MQTT: {payload}")
+                else:
+                    print("Modbus read failed. Attempting reconnect...")
+                    modbus_client.close()
+                    modbus_client = None
+
+            except (socket.error, Exception) as e:
+                print(f"Modbus exception: {e}")
+                if modbus_client:
+                    modbus_client.close()
+                    modbus_client = None
 
             time.sleep(5)
+
     except KeyboardInterrupt:
         print("Program stopped by user.")
+
     finally:
-        modbus_client.close()
+        if modbus_client:
+            modbus_client.close()
         mqtt_client.disconnect()
         print("Connections closed.")
 
